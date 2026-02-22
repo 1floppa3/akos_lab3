@@ -1,2 +1,2 @@
-[DESIGN]
 max-attributes=10
+max-positional-arguments=10

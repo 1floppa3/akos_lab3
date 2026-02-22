@@ -1,3 +1,4 @@
+import argparse
 import threading
 import queue
 import time
@@ -10,22 +11,17 @@ from typing import List, Dict, Tuple
 import signal
 
 
+DEFAULT_WORKER_COUNT = 3
+DEFAULT_JOB_COUNT = 20
+DEFAULT_PATH = "docker_text.txt"
+
+
 @dataclass
 class WorkItem:
     item_id: int
     content: str
     origin: str
     created_at: float = field(default_factory=time.time)
-
-
-@dataclass
-class ProcessingOutput:
-    item_id: int
-    word_counts: Dict[str, int]
-    total_terms: int
-    unique_terms: int
-    worker_id: int
-    duration: float
 
 
 class ContentWorker(threading.Thread):
@@ -73,13 +69,16 @@ class ContentWorker(threading.Thread):
             try:
                 assignment = self.pending_queue.get(timeout=1)
 
+            except queue.Empty:
+                continue
+
+            try:
                 if assignment is self.termination_token:
-                    self.pending_queue.task_done()
                     break
 
                 start_moment = time.time()
 
-                word_freq, total_terms, unique_terms = self.analyze_content(
+                word_freq, total_terms, _ = self.analyze_content(
                     assignment.content)
 
                 self.update_global_stats(word_freq)
@@ -89,13 +88,11 @@ class ContentWorker(threading.Thread):
                 self.total_work_time += elapsed
                 self.terms_handled += total_terms
 
-                self.pending_queue.task_done()
-
                 time.sleep(random.uniform(0.01, 0.03))
 
-            except queue.Empty:
+            except (AttributeError, TypeError, ValueError, re.error):
                 continue
-            except Exception as e:
+            finally:
                 self.pending_queue.task_done()
 
 
@@ -147,7 +144,8 @@ class AssignmentGenerator(threading.Thread):
 
 
 class ProcessingOrchestrator:
-    def __init__(self, worker_pool_size: int = 3, total_jobs: int = 20):
+    def __init__(self, analysis_subject: str, worker_pool_size: int = 3,
+                 total_jobs: int = 20):
         self.worker_pool_size = worker_pool_size
         self.total_jobs = total_jobs
 
@@ -161,28 +159,10 @@ class ProcessingOrchestrator:
         self.generator = None
         self.worker_threads = []
 
-        self.analysis_subject = """
-При разработке приложений часто возникает одна и та же проблема: у каждого разработчика своё окружение. Разные версии библиотек, интерпретаторов, системных зависимостей. В результате код, который стабильно работает на одном компьютере, может не запуститься на другом.
-Docker решает эту проблему — он создаёт единый и воспроизводимый способ запускать приложения.
-Основная идея: Docker — это платформа контейнеризации. Она позволяет упаковать приложение вместе со всеми зависимостями в изолированную среду — контейнер. 
-Такой контейнер можно запустить где угодно: на локальной машине, сервере или в облаке, и результат всегда будет одинаковым.
-До появления Docker основным способом изоляции приложений были виртуальные машины. 
-Каждая виртуальная машина имитировала полноценный компьютер: со своей ОС, драйверами и файловой системой. Для управления ими использовался гипервизор — программный слой, который распределяет ресурсы хоста между несколькими виртуальными машинами.
-Подход надёжный, но тяжёлый. Каждая ВМ занимала сотни мегабайт или гигабайты памяти, запускалась медленно и требовала отдельного обслуживания.
-Docker работает иначе. Он использует подход OS-level virtualization — контейнеризацию на уровне операционной системы. Вместо того чтобы поднимать отдельную ОС под каждое приложение, Docker создаёт изолированные контейнеры, которые делят ядро хостовой системы, но имеют собственное пространство процессов, файлов и сетей.
-Если упрощённо:
-виртуальная машина изолирует железо и поднимает целую операционную систему;
-контейнер изолирует процессы в рамках одной ОС.
-5 причин, зачем нужен Docker
-1. Стабильное окружение. Docker гарантирует, что приложение будет работать одинаково везде — на ноутбуке разработчика, тестовом сервере или в продакшене. Всё, что нужно для запуска, уже собрано в контейнер, поэтому код не зависит от различий в системах и настройках.
-2. Лёгкость и скорость. Контейнеры используют общее ядро операционной системы и не создают отдельную копию ОС. За счёт этого они занимают меньше места и запускаются за секунды. Один сервер может без труда обслуживать десятки контейнеров.
-3. Масштабирование. При росте нагрузки можно просто запустить дополнительные контейнеры — система быстро увеличит мощность и перераспределит ресурсы без изменения кода.
-4. Изоляция процессов. Каждый контейнер работает независимо от других. Если в одном произойдёт сбой или утечка памяти, это не затронет другие контейнеры и систему в целом.
-5. Удобная интеграция в CI/CD. Контейнеры уже стали стандартом в современных пайплайнах. Приложение можно собрать, протестировать и запустить в одинаковой среде — от локальной машины до продакшена. Благодаря этому меньше неожиданных багов, а релизы проходят быстрее и спокойнее.
-"""
+        self.analysis_subject = analysis_subject
 
     def register_interrupt_handlers(self):
-        def interrupt_handler(sig, frame):
+        def interrupt_handler(_sig, _frame):
             print("\nInterrupt signal received. Shutting down...")
             self.shutdown()
             sys.exit(0)
@@ -241,7 +221,7 @@ Docker работает иначе. Он использует подход OS-le
             print(f"     Terms: {worker.terms_handled}")
             print(f"     Time: {worker.total_work_time:.3f}s")
 
-        print(f"  total:")
+        print("  total:")
         print(f"    • Assignments: {total_assignments}")
         print(f"    • Terms: {cumulative_terms}")
         print(f"    • Time: {cumulative_time:.3f}s")
@@ -262,7 +242,7 @@ Docker работает иначе. Он использует подход OS-le
 
             print("\n  Top 30 most frequent terms:")
             for idx, (term, freq) in enumerate(sorted_terms[:30], 1):
-                proportion = (freq / total_occurrences * 100)
+                proportion = freq / total_occurrences * 100
                 print(
                     f"  {idx:2}. {term:25} → {freq:3} times ({proportion:.1f}%)")
 
@@ -271,24 +251,35 @@ Docker работает иначе. Он использует подход OS-le
 
 
 def entry_point():
-    worker_count = 3
-    job_count = 20
+    parser = argparse.ArgumentParser(
+        description="Producer-consumer text analyzer"
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=DEFAULT_WORKER_COUNT,
+        help=f"Number of worker threads (default: {DEFAULT_WORKER_COUNT})"
+    )
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=DEFAULT_JOB_COUNT,
+        help=f"Number of jobs to split text into (default: {DEFAULT_JOB_COUNT})"
+    )
+    parser.add_argument(
+        "-p", "--path",
+        default=DEFAULT_PATH,
+        help=f"Path to text file for analysis (default: {DEFAULT_PATH})"
+    )
+    args = parser.parse_args()
 
-    if len(sys.argv) > 1:
-        try:
-            worker_count = int(sys.argv[1])
-        except ValueError:
-            pass
-
-    if len(sys.argv) > 2:
-        try:
-            job_count = int(sys.argv[2])
-        except ValueError:
-            pass
+    with open(args.path, "r", encoding="utf-8") as text_file:
+        analysis_subject = text_file.read()
 
     system = ProcessingOrchestrator(
-        worker_pool_size=worker_count,
-        total_jobs=job_count
+        analysis_subject=analysis_subject,
+        worker_pool_size=args.workers,
+        total_jobs=args.jobs
     )
 
     system.register_interrupt_handlers()
@@ -300,11 +291,7 @@ def entry_point():
 
         print("\nProcessing completed successfully")
         return 0
-
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        return 1
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         print(f"\nError: {e}")
         return 1
 
